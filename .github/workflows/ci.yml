@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  runs-on: [push, pull_request]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      redis:
+        image: redis:7.4-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+
+    env:
+      REDIS_ADDR: localhost:6379
+
+    steps:
+      - uses: actions/checkout@v4          # downloads your repo onto the machine
+      - uses: actions/setup-go@v5          # installs Go
+        with:
+          go-version-file: ./go.mod
+      - name: Lint
+        run: make lint
+      - name: Test
+        run: make test
