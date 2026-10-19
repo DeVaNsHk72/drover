@@ -17,7 +17,11 @@ var enqueueSrc string
 
 var enqueueScript = redis.NewScript(enqueueSrc)
 
-type State string // new type to represent the state of the broker
+// ErrJobNotFound is returned when no job exists with the given ID.
+var ErrJobNotFound = errors.New("job not found")
+
+// State is where a job is in its lifecycle.
+type State string
 
 const (
 	StateReady     State = "ready"
@@ -25,6 +29,7 @@ const (
 	StateCompleted State = "completed"
 )
 
+// Job is one unit of work.
 type Job struct {
 	ID          string
 	Queue       string
@@ -37,27 +42,33 @@ type Job struct {
 	CreatedAt   time.Time
 }
 
+// Broker talks to Redis. All job state changes go through it.
 type Broker struct {
 	rdb *redis.Client
 }
 
+// New returns a Broker that uses the given Redis client.
 func New(rdb *redis.Client) *Broker {
 	return &Broker{rdb: rdb}
 }
 
+// readyKey is the ZSET of job IDs waiting to run.
 func readyKey(queue string) string {
-	return fmt.Sprintf("drover:{%v}:ready", queue)
+	return fmt.Sprintf("drover:{%s}:ready", queue)
 }
 
+// jobKey is the HASH holding one job's fields.
 func jobKey(queue, id string) string {
-	return fmt.Sprintf("drover:job:{%v}:%v", queue, id)
+	return fmt.Sprintf("drover:job:{%s}:%s", queue, id)
 }
 
+// newID returns a random, URL-safe job ID.
 func newID() string {
 	return rand.Text()
 }
 
-// Enqueue stores a new job and adds it to the queue's ready set
+// Enqueue stores a new job and adds it to the queue's ready set.
+// It returns the new job's ID.
 func (b *Broker) Enqueue(ctx context.Context, queue, jobType string, payload []byte, maxAttempts int) (string, error) {
 	id := newID()
 	keys := []string{
@@ -71,8 +82,7 @@ func (b *Broker) Enqueue(ctx context.Context, queue, jobType string, payload []b
 	return id, nil
 }
 
-var ErrJobNotFound = errors.New("job not found")
-
+// GetJob loads a job's hash from Redis and converts it into a Job.
 func (b *Broker) GetJob(ctx context.Context, queue, id string) (*Job, error) {
 	m, err := b.rdb.HGetAll(ctx, jobKey(queue, id)).Result()
 	if err != nil {
@@ -81,19 +91,28 @@ func (b *Broker) GetJob(ctx context.Context, queue, id string) (*Job, error) {
 	if len(m) == 0 {
 		return nil, ErrJobNotFound
 	}
-	attempts, _ := strconv.Atoi(m["attempts"])
-	max_attempts, _ := strconv.Atoi(m["max_attempts"])
-	created_at, _ := strconv.ParseInt(m["created_at"], 10, 64)
+
+	attempts, err := strconv.Atoi(m["attempts"])
+	if err != nil {
+		return nil, fmt.Errorf("get job: bad attempts: %w", err)
+	}
+	maxAttempts, err := strconv.Atoi(m["max_attempts"])
+	if err != nil {
+		return nil, fmt.Errorf("get job: bad max_attempts: %w", err)
+	}
+	createdAtMs, err := strconv.ParseInt(m["created_at"], 10, 64)
+	if err != nil {
+		return nil, fmt.Errorf("get job: bad created_at: %w", err)
+	}
 
 	return &Job{
 		ID:          m["id"],
 		Queue:       m["queue"],
 		Type:        m["type"],
 		Payload:     []byte(m["payload"]),
-		Priority:    0, // Assuming priority is not stored in the hash
 		Attempts:    attempts,
-		MaxAttempts: max_attempts,
+		MaxAttempts: maxAttempts,
 		State:       State(m["state"]),
-		CreatedAt:   time.Unix(created_at, 0),
+		CreatedAt:   time.UnixMilli(createdAtMs),
 	}, nil
 }
