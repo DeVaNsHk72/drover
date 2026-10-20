@@ -18,8 +18,12 @@ var enqueueSrc string
 //go:embed scripts/dequeue.lua
 var dequeueSrc string
 
+//go:embed scripts/ack.lua
+var ackSrc string
+
 var enqueueScript = redis.NewScript(enqueueSrc)
 var dequeueScript = redis.NewScript(dequeueSrc)
+var ackScript = redis.NewScript(ackSrc)
 
 const defaultLease = 30 * time.Second
 
@@ -28,6 +32,9 @@ var ErrJobNotFound = errors.New("job not found")
 
 // ErrQueueEmpty is returned by Dequeue when no job is ready.
 var ErrQueueEmpty = errors.New("queue empty")
+
+// ErrNotLeased is returned by Ack when the job is not currently leased.
+var ErrNotLeased = errors.New("job not leased")
 
 // State is where a job is in its lifecycle.
 type State string
@@ -148,4 +155,21 @@ func (b *Broker) Dequeue(ctx context.Context, queue string) (string, error) {
 		return "", fmt.Errorf("dequeue: %w", err)
 	}
 	return id, nil
+}
+
+// Ack marks a leased job as completed.
+// It returns ErrNotLeased if the job was never dequeued or was already acked.
+func (b *Broker) Ack(ctx context.Context, queue, id string) error {
+	keys := []string{
+		leasedKey(queue),  // KEYS[1]
+		jobKey(queue, id), // KEYS[2]
+	}
+	n, err := ackScript.Run(ctx, b.rdb, keys, id).Int()
+	if err != nil {
+		return fmt.Errorf("ack: %w", err)
+	}
+	if n == 0 {
+		return ErrNotLeased
+	}
+	return nil
 }

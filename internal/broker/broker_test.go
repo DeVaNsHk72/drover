@@ -108,3 +108,105 @@ func TestEnqueue(t *testing.T) {
 	}
 
 }
+
+func TestDequeue(t *testing.T) {
+	b := newTestBroker(t)
+	ctx := t.Context()
+	queue := "test-" + newID()
+
+	idA, err := b.Enqueue(ctx, queue, "send_email", []byte("A"), 3)
+	if err != nil {
+		t.Fatalf("enqueue A: %v", err)
+	}
+	time.Sleep(2 * time.Millisecond) // different ms → different score → fixed order
+	idB, err := b.Enqueue(ctx, queue, "send_email", []byte("B"), 3)
+	if err != nil {
+		t.Fatalf("enqueue B: %v", err)
+	}
+
+	t.Cleanup(func() {
+		b.rdb.Del(context.Background(),
+			jobKey(queue, idA), jobKey(queue, idB), readyKey(queue), leasedKey(queue))
+	})
+
+	// Oldest job comes out first.
+	got, err := b.Dequeue(ctx, queue)
+	if err != nil {
+		t.Fatalf("first dequeue: %v", err)
+	}
+	if got != idA {
+		t.Fatalf("first dequeue: want %s (A), got %s", idA, got)
+	}
+
+	job, err := b.GetJob(ctx, queue, idA)
+	if err != nil {
+		t.Fatalf("get job A: %v", err)
+	}
+	if job.State != StateActive {
+		t.Errorf("want state %s, got %s", StateActive, job.State)
+	}
+	if job.Attempts != 1 {
+		t.Errorf("want attempts 1, got %d", job.Attempts)
+	}
+
+	if err := b.rdb.ZScore(ctx, leasedKey(queue), idA).Err(); err != nil {
+		t.Errorf("job A not in leased set: %v", err)
+	}
+
+	got, err = b.Dequeue(ctx, queue)
+	if err != nil {
+		t.Fatalf("second dequeue: %v", err)
+	}
+	if got != idB {
+		t.Fatalf("second dequeue: want %s (B), got %s", idB, got)
+	}
+
+	_, err = b.Dequeue(ctx, queue)
+	if !errors.Is(err, ErrQueueEmpty) {
+		t.Errorf("third dequeue: want ErrQueueEmpty, got %v", err)
+	}
+}
+
+func TestAck(t *testing.T) {
+	b := newTestBroker(t)
+	ctx := t.Context()
+	queue := "test-" + newID()
+
+	id, err := b.Enqueue(ctx, queue, "send_email", []byte("hello"), 3)
+	if err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	t.Cleanup(func() {
+		b.rdb.Del(context.Background(), jobKey(queue, id), readyKey(queue), leasedKey(queue))
+	})
+
+	// Can't ack a job nobody has taken.
+	if err := b.Ack(ctx, queue, id); !errors.Is(err, ErrNotLeased) {
+		t.Errorf("ack before dequeue: want ErrNotLeased, got %v", err)
+	}
+
+	if _, err := b.Dequeue(ctx, queue); err != nil {
+		t.Fatalf("dequeue: %v", err)
+	}
+	if err := b.Ack(ctx, queue, id); err != nil {
+		t.Fatalf("ack: %v", err)
+	}
+
+	job, err := b.GetJob(ctx, queue, id)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if job.State != StateCompleted {
+		t.Errorf("want state %s, got %s", StateCompleted, job.State)
+	}
+
+	if err := b.rdb.ZScore(ctx, leasedKey(queue), id).Err(); !errors.Is(err, redis.Nil) {
+		t.Errorf("job still in leased set after ack (err = %v)", err)
+	}
+
+	// A second ack must be rejected.
+	if err := b.Ack(ctx, queue, id); !errors.Is(err, ErrNotLeased) {
+		t.Errorf("second ack: want ErrNotLeased, got %v", err)
+	}
+}
