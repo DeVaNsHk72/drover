@@ -15,10 +15,19 @@ import (
 //go:embed scripts/enqueue.lua
 var enqueueSrc string
 
+//go:embed scripts/dequeue.lua
+var dequeueSrc string
+
 var enqueueScript = redis.NewScript(enqueueSrc)
+var dequeueScript = redis.NewScript(dequeueSrc)
+
+const defaultLease = 30 * time.Second
 
 // ErrJobNotFound is returned when no job exists with the given ID.
 var ErrJobNotFound = errors.New("job not found")
+
+// ErrQueueEmpty is returned by Dequeue when no job is ready.
+var ErrQueueEmpty = errors.New("queue empty")
 
 // State is where a job is in its lifecycle.
 type State string
@@ -115,4 +124,28 @@ func (b *Broker) GetJob(ctx context.Context, queue, id string) (*Job, error) {
 		State:       State(m["state"]),
 		CreatedAt:   time.UnixMilli(createdAtMs),
 	}, nil
+}
+
+func leasedKey(queue string) string {
+	return fmt.Sprintf("drover:{%s}:leased", queue)
+}
+
+// Dequeue leases the oldest ready job in the queue and returns its ID.
+// It returns ErrQueueEmpty if no job is waiting.
+func (b *Broker) Dequeue(ctx context.Context, queue string) (string, error) {
+	keys := []string{
+		readyKey(queue),  // KEYS[1]
+		leasedKey(queue), // KEYS[2]
+	}
+	id, err := dequeueScript.Run(ctx, b.rdb, keys,
+		jobKey(queue, ""),           // ARGV[1]: "drover:job:{queue}:" prefix
+		defaultLease.Milliseconds(), // ARGV[2]: lease in ms
+	).Text()
+	if errors.Is(err, redis.Nil) {
+		return "", ErrQueueEmpty
+	}
+	if err != nil {
+		return "", fmt.Errorf("dequeue: %w", err)
+	}
+	return id, nil
 }

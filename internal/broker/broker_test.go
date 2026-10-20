@@ -25,6 +25,10 @@ func TestKeys(t *testing.T) {
 	if jobKey("emails", "abc") != "drover:job:{emails}:abc" {
 		t.Errorf("jobKey failed, got: %s", jobKey("emails", "abc"))
 	}
+
+	if leasedKey("emails") != "drover:{emails}:leased" {
+		t.Errorf("leasedKey failed, got: %s", leasedKey("emails"))
+	}
 }
 
 func TestNewID(t *testing.T) {
